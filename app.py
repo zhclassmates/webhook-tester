@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify
-import json
 import time
 from collections import defaultdict
 import requests
@@ -8,135 +7,130 @@ app = Flask(__name__)
 
 # Telegram 配置
 TELEGRAM_BOT_TOKEN = "8147535123:AAFGpqQ3zjVYuIF4ajacST5Mxzy9oQZKDS4"  # 替换为你的 Telegram Bot Token
-TELEGRAM_CHAT_ID = "-1002022664219"  # 替换为你的 Telegram Chat ID
+TELEGRAM_CHAT_ID = "-1002022664219"      # 替换为你的 Telegram Chat ID
 
-# 存储监控的交易数据
-monitor_data = defaultdict(list)
+# 存储监控的数据
+transactions_data = []
+address_tracker = defaultdict(list)
+SCAN_INTERVAL = 120  # 2 分钟
+MIN_AMOUNT = 10 * (10 ** 9)  # 转换为 lamports 表示 10 SOL
 
-# 时间窗口
-TIME_WINDOW = 120  # 2 分钟，单位秒
-
+# 处理 Webhook 请求
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # 接收并解析数据
         data = request.json
 
-        # 打印接收到的原始数据到日志
-        print("Received data:", json.dumps(data, indent=4))
+        # 打印接收的原始数据
+        print("Received data:", data)
 
-        # 初始化解析结果
-        relevant_wallets = []  # 符合条件的钱包
-        token_purchases = []   # 记录购买代币的交易
+        current_time = int(time.time())
+        low_balance_wallets = []  # 记录小于 10 SOL 的钱包
+        token_purchases = []  # 记录代币购买的情况
 
-        # 解析数据结构
+        # 遍历 nativeTransfers 检查转账金额
         for event in data:
             for transfer in event.get("nativeTransfers", []):
-                # 监控转移金额小于 10 SOL 的钱包
-                if transfer.get("amount", 0) < 10 * (10 ** 9):  # 转换为 lamports
-                    relevant_wallets.append(transfer["toUserAccount"])
+                amount = transfer.get("amount", 0)
+                if amount > 0 and amount < MIN_AMOUNT:  # 小于 10 SOL 的转账
+                    low_balance_wallets.append(transfer["toUserAccount"])
+                    # 保存该钱包和时间
+                    address_tracker[transfer["toUserAccount"]].append(current_time)
 
-            # 查找代币购买交易
+            # 检查 tokenTransfers 记录代币购买
             for token_transfer in event.get("tokenTransfers", []):
-                if token_transfer["fromUserAccount"] in relevant_wallets:
-                    token_purchases.append({
-                        "from_wallet": token_transfer.get("fromUserAccount"),
-                        "to_wallet": token_transfer.get("toUserAccount"),
-                        "token_mint": token_transfer.get("mint"),
-                        "amount": token_transfer.get("amount"]
-                    })
+                token_purchases.append({
+                    "from_wallet": token_transfer["fromUserAccount"],
+                    "to_wallet": token_transfer["toUserAccount"],
+                    "token_mint": token_transfer["mint"],
+                    "amount": token_transfer["amount"],
+                })
 
-        # 更新监控数据
-        current_time = int(time.time())
-        for purchase in token_purchases:
-            monitor_data[purchase["token_mint"]].append({
-                "time": current_time,
-                "data": purchase
-            })
+        # 将监控结果保存
+        transactions_data.append({"time": current_time, "wallets": low_balance_wallets, "tokens": token_purchases})
 
-        # 每 2 分钟统计并发送到 Telegram
-        check_and_send_summary(current_time)
+        # 定时发送 Telegram 消息
+        if current_time % SCAN_INTERVAL == 0:  # 每 2 分钟执行
+            send_summary_to_telegram()
 
-        # 返回成功响应
         return jsonify({"status": "success", "message": "Data processed"}), 200
 
     except Exception as e:
-        # 打印错误信息到日志
         print(f"Error processing data: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-def check_and_send_summary(current_time):
-    """
-    每 2 分钟统计交易记录，并发送到 Telegram。
-    """
-    grouped_purchases = defaultdict(list)
 
-    # 筛选 2 分钟内的交易记录
-    for token, purchases in monitor_data.items():
-        for purchase in purchases:
-            if current_time - purchase["time"] <= TIME_WINDOW:
-                grouped_purchases[token].append(purchase["data"])
+def send_summary_to_telegram():
+    """
+    构建并发送交易摘要到 Telegram。
+    """
+    global transactions_data
+    current_time = int(time.time())
+    recent_transactions = [tx for tx in transactions_data if current_time - tx["time"] <= SCAN_INTERVAL]
+    
+    message = "🚨 **监控结果**\n\n"
 
-    # 如果有符合条件的交易，发送到 Telegram
-    if grouped_purchases:
-        message = "📊 **2 分钟内交易统计**\n\n"
-        for token, purchases in grouped_purchases.items():
-            if len(purchases) > 1:  # 同一代币被多个钱包购买
-                message += f"⚠️ **代币合约地址 {token} 被多个钱包购买:**\n"
+    # 收集小于 10 SOL 的钱包
+    wallets = set()
+    for tx in recent_transactions:
+        for wallet in tx["wallets"]:
+            wallets.add(wallet)
+    
+    if wallets:
+        message += "📌 转账金额小于 10 SOL 的钱包地址:\n"
+        for wallet in wallets:
+            message += f"- {wallet}\n"
+
+    # 分组统计代币购买
+    token_groups = defaultdict(list)
+    for tx in recent_transactions:
+        for token in tx["tokens"]:
+            token_groups[token["token_mint"]].append(token)
+
+    if token_groups:
+        message += "\n📌 **代币购买情况**:\n"
+        for token_mint, purchases in token_groups.items():
+            if len(purchases) > 1:  # 如果同一代币被多个钱包购买
+                message += f"⚠️ 代币: {token_mint}\n"
                 for purchase in purchases:
                     message += (
-                        f"📍 钱包地址: {purchase['from_wallet']}\n"
-                        f"➡️ 购买数量: {purchase['amount']}\n"
-                        f"🔗 接收地址: {purchase['to_wallet']}\n\n"
+                        f"  - 钱包: {purchase['from_wallet']}, "
+                        f"购买数量: {purchase['amount']}\n"
                     )
-            else:  # 单个钱包购买
-                purchase = purchases[0]
-                message += (
-                    f"📍 钱包地址: {purchase['from_wallet']}\n"
-                    f"➡️ 购买数量: {purchase['amount']}\n"
-                    f"🔗 接收地址: {purchase['to_wallet']}\n\n"
-                )
+            else:
+                for purchase in purchases:
+                    message += (
+                        f"📍 代币: {token_mint}, "
+                        f"钱包: {purchase['from_wallet']}, "
+                        f"购买数量: {purchase['amount']}\n"
+                    )
 
-        send_to_telegram(message)
+    # 如果没有符合条件的交易，发送测试语句
+    if not wallets and not token_groups:
+        message = "📝 **测试结果**: 暂无符合条件的交易。"
 
-    # 清理过期数据
-    cleanup_old_data(current_time)
+    # 发送消息到 Telegram
+    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    response = requests.post(telegram_url, json=payload)
 
-def send_to_telegram(message):
-    """
-    将监控结果发送到 Telegram。
-    """
-    try:
-        telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
-        response = requests.post(telegram_url, json=payload)
+    if response.status_code == 200:
+        print("消息已发送到 Telegram")
+    else:
+        print(f"发送消息到 Telegram 失败: {response.text}")
 
-        if response.status_code == 200:
-            print("消息已发送到 Telegram")
-        else:
-            print(f"发送到 Telegram 失败: {response.text}")
-    except Exception as e:
-        print(f"发送到 Telegram 时出错: {str(e)}")
+    # 清理已处理的交易
+    transactions_data = [tx for tx in transactions_data if current_time - tx["time"] <= SCAN_INTERVAL]
 
-def cleanup_old_data(current_time):
-    """
-    清理超过 2 分钟的旧数据。
-    """
-    for token in list(monitor_data.keys()):
-        monitor_data[token] = [
-            purchase for purchase in monitor_data[token]
-            if current_time - purchase["time"] <= TIME_WINDOW
-        ]
-        if not monitor_data[token]:  # 如果该代币没有数据了，则删除
-            del monitor_data[token]
 
 @app.route('/')
 def home():
     return "Welcome to the Webhook Server!"
+
 
 # 启动 Flask 应用
 if __name__ == '__main__':
