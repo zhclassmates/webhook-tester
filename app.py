@@ -11,8 +11,8 @@ from flask import Flask
 app = Flask(__name__)
 
 # Telegram 配置
-TELEGRAM_BOT_TOKEN = "8147535123:AAFGpqQ3zjVYuIF4ajacST5Mxzy9oQZKDS4"  # 替换为你的 Telegram Bot Token
-TELEGRAM_CHAT_ID = "-1002022664219"  # 替换为你的 Telegram Chat ID
+TELEGRAM_BOT_TOKEN = "8147535123:AAFGpqQ3zjVYuIF4ajacST5Mxzy9oQZKDS4"
+TELEGRAM_CHAT_ID = "-1002022664219"
 
 # Helius API 配置
 API_KEY = "a8837991-562f-4a6d-91f1-a76f13f83495"
